@@ -600,7 +600,10 @@ ShowSummary()
 
         date := parts[1]
         task := parts[2]
-        mins := Integer(Trim(parts[5],"`t`r`n"))
+        minsStr := Trim(parts[5],"`t`r`n")
+        if !IsNumber(minsStr)
+            continue
+        mins := Integer(minsStr)
 
         dateNum := DateToNum(date)
         if dateNum = 0
@@ -985,7 +988,11 @@ AppendLogEntry(task, startTs, endTs)
 {
     global logFile
 
-    mins := Floor(DateDiff(endTs, startTs, "Seconds") / 60)
+    secs := DateDiff(endTs, startTs, "Seconds")
+    if (secs < 60)
+        return
+
+    mins := Floor(secs / 60)
     if (mins < 1)
         mins := 1
 
