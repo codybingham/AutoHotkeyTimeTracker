@@ -899,10 +899,12 @@ AddTimeEntry()
     dtDate.Value := A_Now
 
     gAdd.Add("Text",, "Start time:")
-    startTimeCtl := gAdd.Add("DateTime", "vstartTimeCtl w120 Time Format HH':'mm", A_Now)
+    startTimeCtl := gAdd.Add("DateTime", "vstartTimeCtl w120", "HH':'mm")
+    startTimeCtl.Value := A_Now
 
     gAdd.Add("Text",, "End time:")
-    endTimeCtl := gAdd.Add("DateTime", "vendTimeCtl w120 Time Format HH':'mm", DateAdd(A_Now, 1, "Hours"))
+    endTimeCtl := gAdd.Add("DateTime", "vendTimeCtl w120", "HH':'mm")
+    endTimeCtl.Value := DateAdd(A_Now, 1, "Hours")
 
     btnAdd    := gAdd.Add("Button", "w100", "Add Entry")
     btnCancel := gAdd.Add("Button", "w100", "Cancel")
