@@ -648,7 +648,29 @@ ShowSummary()
 
     out .= "Total today: " Round(todayTotalMins/60, 2) " hrs"
 
-    MsgBox(out)
+    lines := StrSplit(out, "`n")
+    linesCount := lines.Length
+    maxChars := 0
+    for line in lines
+        maxChars := Max(maxChars, StrLen(line))
+
+    summaryGui := Gui("+AlwaysOnTop", "Summary")
+    summaryGui.SetFont("s10", "Consolas")
+
+    charWidth := GetAverageCharWidth(summaryGui.Hwnd)
+    guiWidth := Max(420, (maxChars * charWidth) + 40)
+    guiRows := Max(12, Min(linesCount + 2, 30))
+
+    summaryGui.Add(
+        "Edit",
+        Format("+ReadOnly -Wrap +HScroll xm ym w%d r%d", guiWidth, guiRows),
+        out
+    )
+
+    closeBtn := summaryGui.Add("Button", "xm y+10 w80 Default", "Close")
+    closeBtn.OnEvent("Click", (*) => summaryGui.Destroy())
+
+    summaryGui.Show()
 }
 
 
@@ -661,6 +683,17 @@ GenerateBars(hours)
     Loop Round(hours)
         bars .= "█"
     return bars
+}
+
+GetAverageCharWidth(hwnd)
+{
+    hdc := DllCall("GetDC", "Ptr", hwnd, "Ptr")
+    size := Buffer(8, 0)
+    ; Measure a representative character in the current font to size the summary window.
+    DllCall("GetTextExtentPoint32", "Ptr", hdc, "Str", "W", "Int", 1, "Ptr", size)
+    width := NumGet(size, 0, "Int")
+    DllCall("ReleaseDC", "Ptr", hwnd, "Ptr", hdc)
+    return width
 }
 
 
