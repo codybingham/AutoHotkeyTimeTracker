@@ -31,6 +31,7 @@ DllCall("Wtsapi32.dll\WTSRegisterSessionNotification", "Ptr", A_ScriptHwnd, "UIn
 ^!s::ShowSummary()      ; Summary since last Monday
 ^!d::ManageTasks()      ; Delete/archive tasks
 ^!e::ManageEntries()    ; Delete/archive time entries
+^!a::AddTimeEntry()     ; Manually add a time slot
 
 
 ; ================================================================
@@ -80,6 +81,7 @@ SessionChange(wParam, lParam, msg, hwnd)
                 date := FormatTime(startTime, "yyyy-MM-dd")
                 st   := FormatTime(startTime, "HH:mm")
                 en   := FormatTime(lockStart, "HH:mm")
+                TrimFileTrailingBlanks(logFile)
                 FileAppend(date "," lastTaskBeforeLock "," st "," en "," preMins "`r`n", logFile)
             }
             ; previous task is now stopped
@@ -252,6 +254,7 @@ UnifiedUnlockHandler(
                 st   := FormatTime(lockStart, "HH:mm")
                 en   := FormatTime(lastUnlockTime, "HH:mm")
 
+                TrimFileTrailingBlanks(logFile)
                 FileAppend(date "," lockedTask "," st "," en "," mins "`r`n", logFile)
             }
         }
@@ -385,6 +388,7 @@ StopTask()
     st   := FormatTime(startTime, "HH:mm")
     en   := FormatTime(end, "HH:mm")
 
+    TrimFileTrailingBlanks(logFile)
     FileAppend(date "," currentTask "," st "," en "," mins "`r`n", logFile)
 
     TrayTip("Time Tracker", "Stopped: " currentTask " (" mins " min)")
@@ -594,25 +598,179 @@ DeleteEntry(gEntry, lb)
 
     out := ""
     for line in StrSplit(FileRead(logFile), "`n")
+    {
         if Trim(line) != Trim(sel)
             out .= Trim(line) "`r`n"
+    }
 
     FileDelete(logFile)
     FileAppend(out, logFile)
 
-    MsgBox "Entry deleted."
-    gEntry.Destroy()
+    if lb.Value
+        lb.Delete(lb.Value)
+
+    TrayTip("Time Tracker", "Entry deleted.")
 }
 
 ArchiveEntry(gEntry, lb)
 {
+    global logFile
+
     sel := lb.Text
     if sel = ""
         return
 
     FileAppend(sel "`r`n", A_ScriptDir "\time_archive.csv")
-    DeleteEntry(gEntry, lb)
-    gEntry.Destroy()
+
+    out := ""
+    for line in StrSplit(FileRead(logFile), "`n")
+    {
+        if Trim(line) != Trim(sel)
+            out .= Trim(line) "`r`n"
+    }
+
+    FileDelete(logFile)
+    FileAppend(out, logFile)
+
+    if lb.Value
+        lb.Delete(lb.Value)
+
+    TrayTip("Time Tracker", "Entry archived.")
+}
+
+
+; ================================================================
+; MANUAL TIME ENTRY (ADVANCED GUI)
+; ================================================================
+AddTimeEntry()
+{
+    global tasks
+
+    gAdd := Gui("+AlwaysOnTop", "Add Time Entry")
+
+    gAdd.Add("Text",, "Task:")
+    ddTask := gAdd.Add("DropDownList", "w250", tasks)
+
+    gAdd.Add("Text",, "Or create a new task:")
+    newTask := gAdd.Add("Edit", "w250")
+
+    gAdd.Add("Text",, "Date:")
+    dtDate := gAdd.Add("DateTime", "w200 vdtDate", "yyyy-MM-dd")
+    dtDate.Value := A_Now
+
+    gAdd.Add("Text",, "Start time (HH:mm):")
+    startTimeEdit := gAdd.Add("Edit", "vstartTimeEdit w80", FormatTime(A_Now, "HH:mm"))
+
+    gAdd.Add("Text",, "End time (HH:mm):")
+    endTimeEdit := gAdd.Add("Edit", "vendTimeEdit w80", FormatTime(A_Now, "HH:mm"))
+
+    btnAdd    := gAdd.Add("Button", "w100", "Add Entry")
+    btnCancel := gAdd.Add("Button", "w100", "Cancel")
+
+    btnAdd.OnEvent("Click", (*) => AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit))
+    btnCancel.OnEvent("Click", (*) => gAdd.Destroy())
+
+    gAdd.Show()
+}
+
+AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
+{
+    global tasks, taskFile, logFile
+
+    ; ----- Task selection -----
+    task := ""
+    if (newTask.Value != "")
+    {
+        task := newTask.Value
+        tasks.Push(task)
+        SaveTasks(taskFile, tasks)
+    }
+    else if (ddTask.Text != "")
+    {
+        task := ddTask.Text
+    }
+
+    if (task = "")
+    {
+        MsgBox "Please select or enter a task."
+        return
+    }
+
+    ; ----- Date -----
+    d := dtDate.Value
+    dateStr := FormatTime(d, "yyyy-MM-dd")
+
+    ; ----- Time handling -----
+    startStr := startTimeEdit.Value
+    endStr   := endTimeEdit.Value
+
+    ; Validate time format HH:mm
+    if !RegExMatch(startStr, "^\d{1,2}:\d{2}$")
+    {
+        MsgBox "Invalid start time format. Use HH:mm."
+        return
+    }
+    if !RegExMatch(endStr, "^\d{1,2}:\d{2}$")
+    {
+        MsgBox "Invalid end time format. Use HH:mm."
+        return
+    }
+
+    ; Parse to numbers
+    sParts := StrSplit(startStr, ":")
+    eParts := StrSplit(endStr, ":")
+
+    sh := Integer(sParts[1]), sm := Integer(sParts[2])
+    eh := Integer(eParts[1]), em := Integer(eParts[2])
+
+    if (sh < 0 || sh > 23 || sm < 0 || sm > 59
+     || eh < 0 || eh > 23 || em < 0 || em > 59)
+    {
+        MsgBox "Invalid time values. Hours 0–23, minutes 0–59."
+        return
+    }
+
+    startTotal := sh*60 + sm
+    endTotal   := eh*60 + em
+
+    if (endTotal <= startTotal)
+    {
+        MsgBox "End time must be later than start time."
+        return
+    }
+
+    mins := endTotal - startTotal
+
+    TrimFileTrailingBlanks(logFile)
+    FileAppend(dateStr "," task "," startStr "," endStr "," mins "`r`n", logFile)
+    TrayTip("Time Tracker", "Added manual entry: " task " (" mins " min)")
+
+    gAdd.Destroy()
+}
+
+
+
+; ================================================================
+; CLEAN TRAILING BLANK LINES BEFORE APPENDING
+; ================================================================
+TrimFileTrailingBlanks(file)
+{
+    if !FileExist(file)
+        return
+
+    content := FileRead(file)
+
+    ; Remove trailing blank lines / whitespace
+    cleaned := RTrim(content, "`r`n `t")
+
+    ; Ensure exactly one newline at end
+    cleaned .= "`r`n"
+
+    if (cleaned != content)
+    {
+        FileDelete(file)
+        FileAppend(cleaned, file)
+    }
 }
 
 
