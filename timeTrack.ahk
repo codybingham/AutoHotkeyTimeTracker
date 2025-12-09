@@ -663,7 +663,7 @@ ShowSummary()
 
     summaryGui.Add(
         "Edit",
-        Format("+ReadOnly -Wrap +HScroll xm ym w%d r%d", guiWidth, guiRows),
+        "+ReadOnly -Wrap +HScroll xm ym w" guiWidth " r" guiRows,
         out
     )
 
