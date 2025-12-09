@@ -1127,8 +1127,28 @@ WriteLogLines(file, lines)
     for line in lines
         content .= line "`r`n"
 
-    FileDelete(file)
-    FileAppend(content, file)
+    tempFile := file ".tmp"
+    existingAttrib := FileExist(file) ? FileGetAttrib(file) : ""
+
+    try
+    {
+        if FileExist(tempFile)
+            FileDelete(tempFile)
+
+        FileAppend(content, tempFile)
+
+        if (existingAttrib != "")
+            FileSetAttrib(existingAttrib, tempFile)
+
+        FileMove(tempFile, file, true)
+    }
+    catch as error
+    {
+        if FileExist(tempFile)
+            FileDelete(tempFile)
+
+        throw error
+    }
 }
 
 
