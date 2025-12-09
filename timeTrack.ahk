@@ -4,9 +4,10 @@
 ; ================================================================
 ; CONFIG
 ; ================================================================
-logFile    := A_ScriptDir "\time_log.csv"
-taskFile   := A_ScriptDir "\tasks.txt"
-configFile := A_ScriptDir "\time_tracker.ini"
+logFile        := A_ScriptDir "\time_log.csv"
+invalidLogFile := A_ScriptDir "\time_log_invalid.txt"
+taskFile       := A_ScriptDir "\tasks.txt"
+configFile     := A_ScriptDir "\time_tracker.ini"
 
 ; Defaults (overridden by config/settings GUI)
 DEFAULT_IDLE_THRESHOLD := 5          ; minutes
@@ -566,7 +567,9 @@ ShowSummary()
     if !FileExist(logFile)
         return MsgBox("No time entries logged yet.")
 
-    lines := ReadLogLines(logFile)
+    readResult := ReadLogLines(logFile)
+    WarnInvalidLines(readResult["invalid"], "while reading the time log for the summary")
+    lines := readResult["valid"]
 
     dow := A_WDay  ; 1=Sun,2=Mon,...7=Sat
     if (dow = 2)
@@ -792,12 +795,15 @@ ManageEntries()
 
     NormalizeLogFile()
 
+    readResult := ReadLogLines(logFile)
+    WarnInvalidLines(readResult["invalid"], "while loading entries")
+
     gEntry := Gui("+AlwaysOnTop", "Manage Time Entries")
     gEntry.Add("Text",, "Select a time entry to delete or archive:")
 
     lb := gEntry.Add("ListBox", "w600 r15")
 
-    for line in ReadLogLines(logFile)
+    for line in readResult["valid"]
         lb.Add([line])
 
     btnDelete  := gEntry.Add("Button", "w120", "Delete")
@@ -820,7 +826,9 @@ DeleteEntry(gEntry, lb)
         return
 
     kept := []
-    for line in ReadLogLines(logFile)
+    readResult := ReadLogLines(logFile)
+    WarnInvalidLines(readResult["invalid"], "while deleting an entry")
+    for line in readResult["valid"]
     {
         if (line != Trim(sel))
             kept.Push(line)
@@ -852,7 +860,9 @@ ArchiveEntry(gEntry, lb)
     }
 
     kept := []
-    for line in ReadLogLines(logFile)
+    readResult := ReadLogLines(logFile)
+    WarnInvalidLines(readResult["invalid"], "while archiving an entry")
+    for line in readResult["valid"]
     {
         if (line != Trim(sel))
             kept.Push(line)
@@ -972,7 +982,10 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
     ; ----- Check overlap with existing entries on the same date -----
     if FileExist(logFile)
     {
-        for line in ReadLogLines(logFile)
+        readResult := ReadLogLines(logFile)
+        WarnInvalidLines(readResult["invalid"], "while checking for overlapping entries")
+
+        for line in readResult["valid"]
         {
             parts := StrSplit(line, ",")
             if (parts.Length < 5)
@@ -1052,19 +1065,37 @@ NormalizeLogFile()
     if !FileExist(logFile)
         return
 
-    lines := ReadLogLines(logFile)
-    WriteLogLines(logFile, lines)
+    readResult := ReadLogLines(logFile)
+    WarnInvalidLines(readResult["invalid"], "while cleaning the time log")
+    WriteLogLines(logFile, readResult["valid"])
 }
 
 ; CLEAN TRAILING BLANK LINES BEFORE APPENDING
 ; ================================================================
 TrimFileTrailingBlanks(file)
 {
+    global invalidLogFile
+
     if !FileExist(file)
         return
 
-    lines := ReadLogLines(file)
-    WriteLogLines(file, lines)
+    if (file = invalidLogFile)
+    {
+        cleaned := ""
+        for line in StrSplit(FileRead(file), "`n")
+        {
+            trimmed := Trim(line, "`r`n")
+            if (trimmed != "")
+                cleaned .= trimmed "`r`n"
+        }
+        FileDelete(file)
+        FileAppend(cleaned, file)
+        return
+    }
+
+    readResult := ReadLogLines(file)
+    WarnInvalidLines(readResult["invalid"], "while normalizing log spacing")
+    WriteLogLines(file, readResult["valid"])
 }
 
 SanitizeCsvField(val)
@@ -1081,11 +1112,8 @@ FormatCsvEntry(date, task, start, end, mins)
 
 NormalizeCsvLine(line)
 {
-    parts := StrSplit(line, ",")
-    if (parts.Length < 5)
-        return Trim(line, "`r`n `t")
-
-    return FormatCsvEntry(parts[1], parts[2], parts[3], parts[4], parts[5])
+    validation := ValidateCsvLine(line)
+    return validation.valid ? validation.normalized : ""
 }
 
 AppendCsvLine(file, date, task, start, end, mins)
@@ -1094,24 +1122,137 @@ AppendCsvLine(file, date, task, start, end, mins)
     FileAppend(FormatCsvEntry(date, task, start, end, mins) "`r`n", file)
 }
 
+ValidateCsvLine(line)
+{
+    result := Map()
+    result["line"] := Trim(line, "`r`n `t")
+    result["valid"] := false
+    result["normalized"] := ""
+    result["reason"] := ""
+
+    if (result["line"] = "")
+    {
+        result["reason"] := "Blank line"
+        return result
+    }
+
+    parts := StrSplit(result["line"], ",")
+    if (parts.Length < 5)
+    {
+        result["reason"] := "Expected 5 fields (date, task, start, end, minutes)"
+        return result
+    }
+
+    date := Trim(parts[1])
+    start := Trim(parts[3])
+    finish := Trim(parts[4])
+    mins := Trim(parts[5], "`t`r`n")
+
+    if !RegExMatch(date, "^\d{4}-\d{2}-\d{2}$")
+    {
+        result["reason"] := "Invalid date format (yyyy-MM-dd)"
+        return result
+    }
+
+    dParts := StrSplit(date, "-")
+    y := Integer(dParts[1]), m := Integer(dParts[2]), d := Integer(dParts[3])
+    if (m < 1 || m > 12 || d < 1 || d > 31)
+    {
+        result["reason"] := "Date values out of range"
+        return result
+    }
+
+    if !(IsValidTime(start) && IsValidTime(finish))
+    {
+        result["reason"] := "Invalid time format (HH:mm)"
+        return result
+    }
+
+    if !RegExMatch(mins, "^-?\d+$")
+    {
+        result["reason"] := "Minutes must be an integer"
+        return result
+    }
+
+    if (Integer(mins) < 1)
+    {
+        result["reason"] := "Minutes must be positive"
+        return result
+    }
+
+    result["valid"] := true
+    result["normalized"] := FormatCsvEntry(date, parts[2], start, finish, mins)
+    return result
+}
+
+IsValidTime(val)
+{
+    if !RegExMatch(val, "^\d{2}:\d{2}$")
+        return false
+
+    parts := StrSplit(val, ":")
+    h := Integer(parts[1]), m := Integer(parts[2])
+    return !(h < 0 || h > 23 || m < 0 || m > 59)
+}
+
 ReadLogLines(file)
 {
-    lines := []
+    result := Map()
+    result["valid"] := []
+    result["invalid"] := []
 
     if !FileExist(file)
-        return lines
+        return result
 
     for line in StrSplit(FileRead(file), "`n")
     {
-        trimmed := Trim(line, "`r`n `t")
-        if (trimmed = "")
-            continue
-        normalized := NormalizeCsvLine(trimmed)
-        if (normalized != "")
-            lines.Push(normalized)
+        check := ValidateCsvLine(line)
+        if (check["valid"])
+            result["valid"].Push(check["normalized"])
+        else if (check["line"] != "")
+            result["invalid"].Push(check)
     }
 
-    return lines
+    if (result["invalid"].Length > 0)
+        SaveInvalidLogLines(result["invalid"], file)
+
+    return result
+}
+
+SaveInvalidLogLines(invalidLines, sourceFile := "")
+{
+    global invalidLogFile
+
+    if (invalidLines.Length = 0)
+        return
+
+    TrimFileTrailingBlanks(invalidLogFile)
+
+    for entry in invalidLines
+    {
+        msg := FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss")
+            . (sourceFile != "" ? " | " sourceFile : "")
+            . " | " entry["reason"]
+            . " | " entry["line"]
+
+        FileAppend(msg "`r`n", invalidLogFile)
+    }
+}
+
+WarnInvalidLines(invalidLines, context)
+{
+    global invalidLogFile
+
+    if (invalidLines.Length = 0)
+        return
+
+    first := invalidLines[1]
+    MsgBox(
+        "Skipped " invalidLines.Length " invalid log entr"
+        . "ies " context "." "`n`n"
+        . "First issue: " first["reason"] " → " first["line"] "`n`n"
+        . "See '" invalidLogFile "' for the full list."
+    )
 }
 
 WriteLogLines(file, lines)
