@@ -4,9 +4,24 @@
 ; ================================================================
 ; CONFIG
 ; ================================================================
-logFile  := A_ScriptDir "\time_log.csv"
-taskFile := A_ScriptDir "\tasks.txt"
+logFile    := A_ScriptDir "\time_log.csv"
+taskFile   := A_ScriptDir "\tasks.txt"
+configFile := A_ScriptDir "\time_tracker.ini"
 
+; Defaults (overridden by config/settings GUI)
+DEFAULT_IDLE_THRESHOLD := 5          ; minutes
+DEFAULT_IDLE_POLL_MS   := 15000      ; milliseconds
+DEFAULT_QUICK_LOCK_SEC := 60
+
+; Idle handling (minutes). When you're inactive for this long, the current task stops
+; and you'll be prompted on return about what to do with the idle block.
+IdleThresholdMinutes := DEFAULT_IDLE_THRESHOLD
+; How frequently to check for idle time (milliseconds)
+IdlePollInterval := DEFAULT_IDLE_POLL_MS
+; How long a lock can last (in seconds) and still auto-resume the previous task
+QuickLockResumeSeconds := DEFAULT_QUICK_LOCK_SEC
+
+LoadConfig()
 tasks := LoadTasks(taskFile)
 currentTask := ""
 startTime := ""
@@ -16,11 +31,19 @@ lockStart := ""
 lastTaskBeforeLock := ""
 lastUnlockTime := ""   ; unlock timestamp for locked period
 
+idleActive := false
+idleStart := ""
+lastTaskBeforeIdle := ""
+
 OnExit(SaveTasksOnExit)
 
 ; Register for lock/unlock notifications
 OnMessage(0x02B1, SessionChange)
 DllCall("Wtsapi32.dll\WTSRegisterSessionNotification", "Ptr", A_ScriptHwnd, "UInt", 0)
+
+; Clean up any blank lines created by earlier versions and start idle polling
+NormalizeLogFile()
+SetTimer(IdleMonitor, IdlePollInterval)
 
 
 ; ================================================================
@@ -32,6 +55,7 @@ DllCall("Wtsapi32.dll\WTSRegisterSessionNotification", "Ptr", A_ScriptHwnd, "UIn
 ^!d::ManageTasks()      ; Delete/archive tasks
 ^!e::ManageEntries()    ; Delete/archive time entries
 ^!a::AddTimeEntry()     ; Manually add a time slot
+^!c::OpenSettings()     ; Configure idle/lock behavior
 
 
 ; ================================================================
@@ -59,41 +83,69 @@ SessionChange(wParam, lParam, msg, hwnd)
         lastUnlockTime := A_Now
         durationSec := DateDiff(lastUnlockTime, lockStart, "Seconds")
 
-        ; QUICK LOCK (≤60s) → resume silently
-        if (durationSec <= 60)
+        ; QUICK LOCK (≤ QuickLockResumeSeconds) → resume silently
+        if (durationSec <= QuickLockResumeSeconds)
         {
             if (lastTaskBeforeLock != "")
             {
                 currentTask := lastTaskBeforeLock
-                startTime := A_Now
+                ; keep original startTime so pre-lock work isn't lost
+                if (startTime = "")
+                    startTime := lastUnlockTime
                 TrayTip("Time Tracker", "Resumed: " currentTask " (quick lock)")
             }
             return
         }
 
-        ; LONG LOCK (>60s)
+        ; LONG LOCK (> QuickLockResumeSeconds)
         ; 1) Always log pre-lock work for the previous task (if any)
         if (lastTaskBeforeLock != "" && startTime != "")
-        {
-            preMins := DateDiff(lockStart, startTime, "Minutes")
-            if (preMins > 0)
-            {
-                date := FormatTime(startTime, "yyyy-MM-dd")
-                st   := FormatTime(startTime, "HH:mm")
-                en   := FormatTime(lockStart, "HH:mm")
-                TrimFileTrailingBlanks(logFile)
-                FileAppend(date "," lastTaskBeforeLock "," st "," en "," preMins "`r`n", logFile)
-            }
-            ; previous task is now stopped
-            currentTask := ""
-            startTime := ""
-        }
+            StopTask(lockStart, false)
 
         ; 2) Show unified popup for locked time + next action
         lockedMinutes := Floor(durationSec / 60)
         hasPrev := (lastTaskBeforeLock != "")
         ShowUnifiedUnlockPopup(lockedMinutes, hasPrev)
         return
+    }
+}
+
+
+; ================================================================
+; IDLE MONITOR
+; ================================================================
+IdleMonitor()
+{
+    global IdleThresholdMinutes, idleActive, idleStart, lastTaskBeforeIdle
+    global currentTask, startTime, locked
+
+    ; Do not treat OS locks as idle — they are already handled elsewhere
+    if (locked)
+        return
+
+    idleSec := A_TimeIdlePhysical // 1000  ; milliseconds → seconds
+    thresholdSec := IdleThresholdMinutes * 60
+
+    ; Entering idle state
+    if (!idleActive && currentTask != "" && idleSec >= thresholdSec)
+    {
+        idleActive := true
+        ; Estimate when idle began based on inactivity duration
+        idleStart := DateAdd(A_Now, -idleSec, "Seconds")
+        lastTaskBeforeIdle := currentTask
+        StopTask(idleStart, false)
+        return
+    }
+
+    ; Returning from idle
+    if (idleActive && idleSec < thresholdSec)
+    {
+        idleActive := false
+        idleEnd := A_Now
+        idleMinutes := Floor(DateDiff(idleEnd, idleStart, "Seconds") / 60)
+        if (idleMinutes < 1)
+            idleMinutes := 1
+        ShowIdleReturnPopup(idleMinutes, (lastTaskBeforeIdle != ""))
     }
 }
 
@@ -237,9 +289,7 @@ UnifiedUnlockHandler(
 
         if (newLocked.Value != "")
         {
-            lockedTask := newLocked.Value
-            tasks.Push(lockedTask)
-            SaveTasks(taskFile, tasks)
+            lockedTask := AddTask(newLocked.Value)
         }
         else if (ddLocked.Text != "")
             lockedTask := ddLocked.Text
@@ -294,9 +344,7 @@ UnifiedUnlockHandler(
     {
         if (newNext.Value != "")
         {
-            nextTask := newNext.Value
-            tasks.Push(nextTask)
-            SaveTasks(taskFile, tasks)
+            nextTask := AddTask(newNext.Value)
         }
         else if (ddNext.Text != "")
         {
@@ -314,6 +362,114 @@ UnifiedUnlockHandler(
     if (nextTask != "")
         StartTask(nextTask)
 }
+
+
+; ================================================================
+; IDLE RETURN POPUP
+; ================================================================
+ShowIdleReturnPopup(idleMinutes, hasPrevTask)
+{
+    global tasks
+
+    gIdle := Gui("+AlwaysOnTop", "Idle Detected")
+
+    gIdle.Add("Text", "xm ym", "You were idle for ~" idleMinutes " minutes.")
+
+    gIdle.Add("GroupBox", "xm y+10 w380 h150", "Handle idle block")
+    gIdle.Add("Text", "xm+10 yp+25", "Assign idle time to task (optional):")
+    ddIdle := gIdle.Add("DropDownList", "xp w250", tasks)
+    gIdle.Add("Text", "xp y+5", "Or create a new task:")
+    newIdle := gIdle.Add("Edit", "xp w250")
+    skipIdle := gIdle.Add("CheckBox", "xp y+10 vSkipIdle", "Discard idle time")
+
+    gIdle.Add("GroupBox", "xm y+15 w380 h170", "What to do now")
+    resumeChk := gIdle.Add("CheckBox", "xm+10 yp+25 vResumeIdle", "Resume previous task")
+    if !hasPrevTask
+    {
+        resumeChk.Enabled := false
+        resumeChk.Value := 0
+    }
+
+    gIdle.Add("Text", "xp y+10", "Start existing task:")
+    ddNext := gIdle.Add("DropDownList", "xp w250", tasks)
+    gIdle.Add("Text", "xp y+5", "Or create a new task:")
+    newNext := gIdle.Add("Edit", "xp w250")
+    noTaskChk := gIdle.Add("CheckBox", "xp y+10 vIdleNoTask", "Do not start a task")
+
+    resumeChk.OnEvent("Click", (*) => (
+        resumeChk.Value
+            ? (noTaskChk.Value := 0, ddNext.Enabled := false, newNext.Enabled := false)
+            : (ddNext.Enabled := !noTaskChk.Value, newNext.Enabled := !noTaskChk.Value)
+    ))
+    noTaskChk.OnEvent("Click", (*) => (
+        noTaskChk.Value
+            ? (resumeChk.Value := 0, ddNext.Enabled := false, newNext.Enabled := false)
+            : (ddNext.Enabled := !resumeChk.Value, newNext.Enabled := !resumeChk.Value)
+    ))
+
+    btnOK := gIdle.Add("Button", "xm y+20 w120", "OK")
+    btnCancel := gIdle.Add("Button", "x+m w120", "Cancel")
+
+    btnOK.OnEvent("Click", (*) => HandleIdleReturn(
+        gIdle, idleMinutes, ddIdle, newIdle, skipIdle,
+        resumeChk, ddNext, newNext, noTaskChk, hasPrevTask
+    ))
+    btnCancel.OnEvent("Click", (*) => gIdle.Destroy())
+
+    gIdle.Show()
+}
+
+HandleIdleReturn(gIdle, idleMinutes, ddIdle, newIdle, skipIdle,
+    resumeChk, ddNext, newNext, noTaskChk, hasPrevTask)
+{
+    global lastTaskBeforeIdle, idleStart, logFile
+
+    ; Optionally log idle block
+    if (!skipIdle.Value)
+    {
+        idleTask := ""
+        if (newIdle.Value != "")
+            idleTask := AddTask(newIdle.Value)
+        else if (ddIdle.Text != "")
+            idleTask := ddIdle.Text
+
+        if (idleTask = "")
+            return MsgBox("Select or enter a task to assign idle time, or choose 'Discard idle time'.")
+
+        idleEnd := A_Now
+        AppendLogEntry(idleTask, idleStart, idleEnd)
+    }
+
+    nextTask := ""
+    if (resumeChk.Value)
+    {
+        if hasPrevTask
+            nextTask := lastTaskBeforeIdle
+        else
+            return MsgBox("There is no previous task to resume.")
+    }
+    else if (noTaskChk.Value)
+    {
+        gIdle.Destroy()
+        return
+    }
+    else
+    {
+        if (newNext.Value != "")
+            nextTask := AddTask(newNext.Value)
+        else if (ddNext.Text != "")
+            nextTask := ddNext.Text
+        else
+            return MsgBox("Select or create a task, resume previous, or pick 'Do not start a task'.")
+    }
+
+    gIdle.Destroy()
+    lastTaskBeforeIdle := ""
+    idleStart := ""
+    if (nextTask != "")
+        StartTask(nextTask)
+}
+
 
 
 ; ================================================================
@@ -349,9 +505,13 @@ StartTaskFromGui(gPicker, dd, newTask)
 
     if typed != ""
     {
-        tasks.Push(typed)
-        SaveTasks(taskFile, tasks)
-        StartTask(typed)
+        taskName := AddTask(typed)
+        if (taskName = "")
+        {
+            MsgBox "Please enter a valid task name."
+            return
+        }
+        StartTask(taskName)
     }
     else if chosen != ""
         StartTask(chosen)
@@ -375,23 +535,23 @@ StartTask(name)
     TrayTip("Time Tracker", "Started: " name)
 }
 
-StopTask()
+StopTask(endTime := "", showTip := true)
 {
     global currentTask, startTime, logFile
 
-    if currentTask = ""
+    if (currentTask = "" || startTime = "")
         return
 
-    end := A_Now
-    mins := DateDiff(end, startTime, "Minutes")
-    date := FormatTime(startTime, "yyyy-MM-dd")
-    st   := FormatTime(startTime, "HH:mm")
-    en   := FormatTime(end, "HH:mm")
+    end := (endTime = "") ? A_Now : endTime
+    AppendLogEntry(currentTask, startTime, end)
 
-    TrimFileTrailingBlanks(logFile)
-    FileAppend(date "," currentTask "," st "," en "," mins "`r`n", logFile)
-
-    TrayTip("Time Tracker", "Stopped: " currentTask " (" mins " min)")
+    if showTip
+    {
+        mins := Floor(DateDiff(end, startTime, "Seconds") / 60)
+        if (mins < 1)
+            mins := 1
+        TrayTip("Time Tracker", "Stopped: " currentTask " (" mins " min)")
+    }
     currentTask := ""
     startTime := ""
 }
@@ -402,7 +562,7 @@ StopTask()
 ; ================================================================
 ShowSummary()
 {
-    global logFile
+    global logFile, currentTask, startTime
 
     if !FileExist(logFile)
         return MsgBox("No time entries logged yet.")
@@ -420,7 +580,13 @@ ShowSummary()
     mondayDate := FormatTime(DateAdd(A_Now, -offset, "Days"), "yyyy-MM-dd")
     mondayNum  := DateToNum(mondayDate)
 
-    totals := Map()
+    totalsWeek := Map()
+    totalsToday := Map()
+    weeklyTotalMins := 0
+    todayTotalMins := 0
+
+    todayDate := FormatTime(A_Now, "yyyy-MM-dd")
+    todayNum  := DateToNum(todayDate)
 
     for line in lines
     {
@@ -440,19 +606,44 @@ ShowSummary()
         if dateNum = 0
             continue
 
-        if dateNum < mondayNum
-            continue
+        if (dateNum >= mondayNum)
+        {
+            totalsWeek[task] := (totalsWeek.Has(task) ? totalsWeek[task] : 0) + mins
+            weeklyTotalMins += mins
+        }
 
-        totals[task] := (totals.Has(task) ? totals[task] : 0) + mins
+        if (dateNum = todayNum)
+        {
+            totalsToday[task] := (totalsToday.Has(task) ? totalsToday[task] : 0) + mins
+            todayTotalMins += mins
+        }
     }
 
-    out := "⏱ Summary (since last Monday)`n`n"
+    out := "⏱ Summary`n`n"
 
-    for task, mins in totals
-        out .= task ": " Round(mins / 60, 2) " hrs  " GenerateBars(Round(mins/60,2)) "`n"
+    if (currentTask != "" && startTime != "")
+    {
+        activeMins := Max(0, DateDiff(A_Now, startTime, "Minutes"))
+        out .= "Current: " currentTask " (" Round(activeMins/60,2) " hrs, started " FormatTime(startTime, "HH:mm") ")`n`n"
+    }
 
-    if totals.Count = 0
-        out .= "(no entries since last Monday)"
+    out .= "This week (since " mondayDate "):`n"
+    if totalsWeek.Count = 0
+        out .= "  (no entries)`n"
+    else
+        for task, mins in totalsWeek
+            out .= "  " task ": " Round(mins / 60, 2) " hrs  " GenerateBars(Round(mins/60,2)) "`n"
+
+    out .= "Total: " Round(weeklyTotalMins/60, 2) " hrs`n`n"
+
+    out .= "Today (" todayDate "):`n"
+    if totalsToday.Count = 0
+        out .= "  (no entries)`n"
+    else
+        for task, mins in totalsToday
+            out .= "  " task ": " Round(mins / 60, 2) " hrs  " GenerateBars(Round(mins/60,2)) "`n"
+
+    out .= "Total today: " Round(todayTotalMins/60, 2) " hrs"
 
     MsgBox(out)
 }
@@ -525,18 +716,12 @@ DeleteTask(gTask, dd)
     if task = ""
         return
 
-    idx := 0
-    for i, t in tasks
-        if (t = task)
-        {
-            idx := i
-            break
-        }
+    before := tasks.Length
+    RemoveTask(task)
 
-    if idx = 0
+    if (tasks.Length = before)
         return MsgBox("Task not found.")
 
-    tasks.RemoveAt(idx)
     SaveTasks(taskFile, tasks)
 
     MsgBox "Task deleted: " task
@@ -545,11 +730,15 @@ DeleteTask(gTask, dd)
 
 ArchiveTask(gTask, dd)
 {
+    global tasks, taskFile
+
     task := dd.Text
     if task = ""
         return
 
-    FileAppend(task "`r`n", A_ScriptDir "\task_archive.txt")
+    FileAppend(task "`r`n", A_ScriptDir "\\task_archive.txt")
+    RemoveTask(task)
+    SaveTasks(taskFile, tasks)
     MsgBox "Task archived: " task
     gTask.Destroy()
 }
@@ -564,6 +753,8 @@ ManageEntries()
 
     if !FileExist(logFile)
         return MsgBox("No entries to manage.")
+
+    NormalizeLogFile()
 
     gEntry := Gui("+AlwaysOnTop", "Manage Time Entries")
     gEntry.Add("Text",, "Select a time entry to delete or archive:")
@@ -599,12 +790,16 @@ DeleteEntry(gEntry, lb)
     out := ""
     for line in StrSplit(FileRead(logFile), "`n")
     {
-        if Trim(line) != Trim(sel)
-            out .= Trim(line) "`r`n"
+        trimmed := Trim(line, "`r`n `t")
+        if (trimmed = "")
+            continue
+        if (trimmed != Trim(sel))
+            out .= trimmed "`r`n"
     }
 
     FileDelete(logFile)
     FileAppend(out, logFile)
+    NormalizeLogFile()
 
     if lb.Value
         lb.Delete(lb.Value)
@@ -625,12 +820,16 @@ ArchiveEntry(gEntry, lb)
     out := ""
     for line in StrSplit(FileRead(logFile), "`n")
     {
-        if Trim(line) != Trim(sel)
-            out .= Trim(line) "`r`n"
+        trimmed := Trim(line, "`r`n `t")
+        if (trimmed = "")
+            continue
+        if (trimmed != Trim(sel))
+            out .= trimmed "`r`n"
     }
 
     FileDelete(logFile)
     FileAppend(out, logFile)
+    NormalizeLogFile()
 
     if lb.Value
         lb.Delete(lb.Value)
@@ -681,9 +880,7 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
     task := ""
     if (newTask.Value != "")
     {
-        task := newTask.Value
-        tasks.Push(task)
-        SaveTasks(taskFile, tasks)
+        task := AddTask(newTask.Value)
     }
     else if (ddTask.Text != "")
     {
@@ -741,8 +938,39 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
 
     mins := endTotal - startTotal
 
+    ; ----- Check overlap with existing entries on the same date -----
+    if FileExist(logFile)
+    {
+        for line in StrSplit(FileRead(logFile), "`n")
+        {
+            trimmed := Trim(line)
+            if (trimmed = "")
+                continue
+
+            parts := StrSplit(trimmed, ",")
+            if (parts.Length < 5)
+                continue
+
+            existingDate := Trim(parts[1])
+            if (existingDate != dateStr)
+                continue
+
+            est := TimeStrToMinutes(parts[3])
+            eet := TimeStrToMinutes(parts[4])
+            if (est < 0 || eet <= est)
+                continue
+
+            if (IntervalsOverlap(startTotal, endTotal, est, eet))
+            {
+                MsgBox "Manual entry overlaps existing entry:" "`n" Trim(parts[2]) " (" parts[3] " - " parts[4] ")"
+                return
+            }
+        }
+    }
+
     TrimFileTrailingBlanks(logFile)
     FileAppend(dateStr "," task "," startStr "," endStr "," mins "`r`n", logFile)
+    NormalizeLogFile()
     TrayTip("Time Tracker", "Added manual entry: " task " (" mins " min)")
 
     gAdd.Destroy()
@@ -751,6 +979,63 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
 
 
 ; ================================================================
+; LOG HELPERS
+; ================================================================
+AppendLogEntry(task, startTs, endTs)
+{
+    global logFile
+
+    mins := Floor(DateDiff(endTs, startTs, "Seconds") / 60)
+    if (mins < 1)
+        mins := 1
+
+    date := FormatTime(startTs, "yyyy-MM-dd")
+    st   := FormatTime(startTs, "HH:mm")
+    en   := FormatTime(endTs, "HH:mm")
+
+    TrimFileTrailingBlanks(logFile)
+    FileAppend(date "," task "," st "," en "," mins "`r`n", logFile)
+}
+
+TimeStrToMinutes(str)
+{
+    if !RegExMatch(str, "^(\d{1,2}):(\d{2})$", &m)
+        return -1
+
+    h := Integer(m[1])
+    mi := Integer(m[2])
+
+    if (h < 0 || h > 23 || mi < 0 || mi > 59)
+        return -1
+
+    return h*60 + mi
+}
+
+IntervalsOverlap(s1, e1, s2, e2)
+{
+    return (s1 < e2) && (e1 > s2)
+}
+
+NormalizeLogFile()
+{
+    global logFile
+
+    if !FileExist(logFile)
+        return
+
+    cleaned := ""
+    for line in StrSplit(FileRead(logFile), "`n")
+    {
+        trimmed := Trim(line, "`r`n `t")
+        if (trimmed = "")
+            continue
+        cleaned .= trimmed "`r`n"
+    }
+
+    FileDelete(logFile)
+    FileAppend(cleaned, logFile)
+}
+
 ; CLEAN TRAILING BLANK LINES BEFORE APPENDING
 ; ================================================================
 TrimFileTrailingBlanks(file)
@@ -786,6 +1071,39 @@ LoadTasks(file)
     return raw = "" ? [] : StrSplit(raw, "`n")
 }
 
+AddTask(name)
+{
+    global tasks, taskFile
+
+    clean := Trim(name)
+    if (clean = "")
+        return ""
+
+    for existing in tasks
+        if (StrLower(existing) = StrLower(clean))
+            return existing
+
+    tasks.Push(clean)
+    SaveTasks(taskFile, tasks)
+    return clean
+}
+
+RemoveTask(name)
+{
+    global tasks
+
+    idx := 0
+    for i, t in tasks
+        if (StrLower(t) = StrLower(name))
+        {
+            idx := i
+            break
+        }
+
+    if (idx > 0)
+        tasks.RemoveAt(idx)
+}
+
 SaveTasks(file, tasks)
 {
     out := ""
@@ -803,4 +1121,116 @@ SaveTasksOnExit(*)
     global taskFile, tasks
     SaveTasks(taskFile, tasks)
     DllCall("Wtsapi32.dll\WTSUnRegisterSessionNotification", "Ptr", A_ScriptHwnd)
+}
+
+; ================================================================
+; SETTINGS (IDLE / LOCK CONFIG)
+; ================================================================
+OpenSettings()
+{
+    global IdleThresholdMinutes, IdlePollInterval, QuickLockResumeSeconds
+
+    gSet := Gui("+AlwaysOnTop", "Time Tracker Settings")
+
+    gSet.Add("Text",, "Idle threshold (minutes before pausing):")
+    idleEdit := gSet.Add("Edit", "w120", IdleThresholdMinutes)
+
+    gSet.Add("Text",, "Idle poll interval (milliseconds):")
+    pollEdit := gSet.Add("Edit", "w120", IdlePollInterval)
+
+    gSet.Add("Text",, "Quick lock resume window (seconds):")
+    lockEdit := gSet.Add("Edit", "w120", QuickLockResumeSeconds)
+
+    btnSave   := gSet.Add("Button", "w100", "Save")
+    btnCancel := gSet.Add("Button", "w100", "Cancel")
+
+    btnSave.OnEvent("Click", (*) => SaveSettingsFromGui(gSet, idleEdit, pollEdit, lockEdit))
+    btnCancel.OnEvent("Click", (*) => gSet.Destroy())
+
+    gSet.Show()
+}
+
+SaveSettingsFromGui(gSet, idleEdit, pollEdit, lockEdit)
+{
+    global IdleThresholdMinutes, IdlePollInterval, QuickLockResumeSeconds
+
+    idleVal := ParsePositiveInt(idleEdit.Value, 0)
+    pollVal := ParsePositiveInt(pollEdit.Value, 0)
+    lockVal := ParsePositiveInt(lockEdit.Value, 0)
+
+    if (idleVal < 1)
+        return MsgBox("Idle threshold must be at least 1 minute.")
+
+    if (pollVal < 1000)
+        return MsgBox("Idle poll interval should be at least 1000 ms to avoid high CPU usage.")
+
+    if (lockVal < 5)
+        return MsgBox("Quick lock resume window must be 5 seconds or greater.")
+
+    IdleThresholdMinutes := idleVal
+    IdlePollInterval := pollVal
+    QuickLockResumeSeconds := lockVal
+
+    SaveConfig()
+    RestartIdleTimer()
+
+    TrayTip("Time Tracker", "Settings saved.")
+    gSet.Destroy()
+}
+
+RestartIdleTimer()
+{
+    global IdlePollInterval
+    SetTimer(IdleMonitor, 0)
+    SetTimer(IdleMonitor, IdlePollInterval)
+}
+
+LoadConfig()
+{
+    global configFile, IdleThresholdMinutes, IdlePollInterval, QuickLockResumeSeconds
+    global DEFAULT_IDLE_THRESHOLD, DEFAULT_IDLE_POLL_MS, DEFAULT_QUICK_LOCK_SEC
+
+    if !FileExist(configFile)
+    {
+        IdleThresholdMinutes := DEFAULT_IDLE_THRESHOLD
+        IdlePollInterval := DEFAULT_IDLE_POLL_MS
+        QuickLockResumeSeconds := DEFAULT_QUICK_LOCK_SEC
+        return
+    }
+
+    IdleThresholdMinutes := ParsePositiveInt(
+        IniRead(configFile, "Settings", "IdleThresholdMinutes", DEFAULT_IDLE_THRESHOLD),
+        DEFAULT_IDLE_THRESHOLD
+    )
+
+    IdlePollInterval := ParsePositiveInt(
+        IniRead(configFile, "Settings", "IdlePollInterval", DEFAULT_IDLE_POLL_MS),
+        DEFAULT_IDLE_POLL_MS
+    )
+
+    QuickLockResumeSeconds := ParsePositiveInt(
+        IniRead(configFile, "Settings", "QuickLockResumeSeconds", DEFAULT_QUICK_LOCK_SEC),
+        DEFAULT_QUICK_LOCK_SEC
+    )
+}
+
+SaveConfig()
+{
+    global configFile, IdleThresholdMinutes, IdlePollInterval, QuickLockResumeSeconds
+
+    IniWrite(IdleThresholdMinutes, configFile, "Settings", "IdleThresholdMinutes")
+    IniWrite(IdlePollInterval, configFile, "Settings", "IdlePollInterval")
+    IniWrite(QuickLockResumeSeconds, configFile, "Settings", "QuickLockResumeSeconds")
+}
+
+ParsePositiveInt(val, fallback)
+{
+    val := Trim(val)
+    if RegExMatch(val, "^-?\d+$")
+    {
+        n := Integer(val)
+        if (n > 0)
+            return n
+    }
+    return fallback
 }
