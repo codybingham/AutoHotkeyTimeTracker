@@ -304,8 +304,7 @@ UnifiedUnlockHandler(
                 st   := FormatTime(lockStart, "HH:mm")
                 en   := FormatTime(lastUnlockTime, "HH:mm")
 
-                TrimFileTrailingBlanks(logFile)
-                FileAppend(date "," lockedTask "," st "," en "," mins "`r`n", logFile)
+                AppendCsvLine(logFile, date, lockedTask, st, en, mins)
             }
         }
         else
@@ -567,7 +566,7 @@ ShowSummary()
     if !FileExist(logFile)
         return MsgBox("No time entries logged yet.")
 
-    lines := StrSplit(FileRead(logFile), "`n")
+    lines := ReadLogLines(logFile)
 
     dow := A_WDay  ; 1=Sun,2=Mon,...7=Sat
     if (dow = 2)
@@ -599,7 +598,7 @@ ShowSummary()
             continue
 
         date := parts[1]
-        task := parts[2]
+        task := Trim(parts[2], " `t")
         minsStr := Trim(parts[5],"`t`r`n")
         if !IsNumber(minsStr)
             continue
@@ -661,7 +660,7 @@ ShowSummary()
     guiWidth := Max(420, (maxChars * charWidth) + 40)
     guiRows := Max(12, Min(linesCount + 2, 30))
 
-    summaryGui.Add(
+    summaryEdit := summaryGui.Add(
         "Edit",
         "+ReadOnly -Wrap +HScroll xm ym w" guiWidth " r" guiRows,
         out
@@ -671,6 +670,7 @@ ShowSummary()
     closeBtn.OnEvent("Click", (*) => summaryGui.Destroy())
 
     summaryGui.Show()
+    closeBtn.Focus()
 }
 
 
@@ -797,12 +797,8 @@ ManageEntries()
 
     lb := gEntry.Add("ListBox", "w600 r15")
 
-    Loop Parse, FileRead(logFile), "`n"
-    {
-        line := Trim(A_LoopField)
-        if line != ""
-            lb.Add([line])
-    }
+    for line in ReadLogLines(logFile)
+        lb.Add([line])
 
     btnDelete  := gEntry.Add("Button", "w120", "Delete")
     btnArchive := gEntry.Add("Button", "w120", "Archive")
@@ -823,18 +819,15 @@ DeleteEntry(gEntry, lb)
     if sel = ""
         return
 
-    out := ""
-    for line in StrSplit(FileRead(logFile), "`n")
+    kept := []
+    for line in ReadLogLines(logFile)
     {
-        trimmed := Trim(line, "`r`n `t")
-        if (trimmed = "")
-            continue
-        if (trimmed != Trim(sel))
-            out .= trimmed "`r`n"
+        if (line != Trim(sel))
+            kept.Push(line)
     }
 
-    FileDelete(logFile)
-    FileAppend(out, logFile)
+    WriteLogLines(logFile, kept)
+
     NormalizeLogFile()
 
     if lb.Value
@@ -851,20 +844,22 @@ ArchiveEntry(gEntry, lb)
     if sel = ""
         return
 
-    FileAppend(sel "`r`n", A_ScriptDir "\time_archive.csv")
-
-    out := ""
-    for line in StrSplit(FileRead(logFile), "`n")
+    archiveLine := NormalizeCsvLine(sel)
+    if (archiveLine != "")
     {
-        trimmed := Trim(line, "`r`n `t")
-        if (trimmed = "")
-            continue
-        if (trimmed != Trim(sel))
-            out .= trimmed "`r`n"
+        TrimFileTrailingBlanks(A_ScriptDir "\\time_archive.csv")
+        FileAppend(archiveLine "`r`n", A_ScriptDir "\\time_archive.csv")
     }
 
-    FileDelete(logFile)
-    FileAppend(out, logFile)
+    kept := []
+    for line in ReadLogLines(logFile)
+    {
+        if (line != Trim(sel))
+            kept.Push(line)
+    }
+
+    WriteLogLines(logFile, kept)
+
     NormalizeLogFile()
 
     if lb.Value
@@ -977,13 +972,9 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
     ; ----- Check overlap with existing entries on the same date -----
     if FileExist(logFile)
     {
-        for line in StrSplit(FileRead(logFile), "`n")
+        for line in ReadLogLines(logFile)
         {
-            trimmed := Trim(line)
-            if (trimmed = "")
-                continue
-
-            parts := StrSplit(trimmed, ",")
+            parts := StrSplit(line, ",")
             if (parts.Length < 5)
                 continue
 
@@ -1004,8 +995,7 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
         }
     }
 
-    TrimFileTrailingBlanks(logFile)
-    FileAppend(dateStr "," task "," startStr "," endStr "," mins "`r`n", logFile)
+    AppendCsvLine(logFile, dateStr, task, startStr, endStr, mins)
     NormalizeLogFile()
     TrayTip("Time Tracker", "Added manual entry: " task " (" mins " min)")
 
@@ -1033,8 +1023,7 @@ AppendLogEntry(task, startTs, endTs)
     st   := FormatTime(startTs, "HH:mm")
     en   := FormatTime(endTs, "HH:mm")
 
-    TrimFileTrailingBlanks(logFile)
-    FileAppend(date "," task "," st "," en "," mins "`r`n", logFile)
+    AppendCsvLine(logFile, date, task, st, en, mins)
 }
 
 TimeStrToMinutes(str)
@@ -1063,17 +1052,8 @@ NormalizeLogFile()
     if !FileExist(logFile)
         return
 
-    cleaned := ""
-    for line in StrSplit(FileRead(logFile), "`n")
-    {
-        trimmed := Trim(line, "`r`n `t")
-        if (trimmed = "")
-            continue
-        cleaned .= trimmed "`r`n"
-    }
-
-    FileDelete(logFile)
-    FileAppend(cleaned, logFile)
+    lines := ReadLogLines(logFile)
+    WriteLogLines(logFile, lines)
 }
 
 ; CLEAN TRAILING BLANK LINES BEFORE APPENDING
@@ -1083,19 +1063,72 @@ TrimFileTrailingBlanks(file)
     if !FileExist(file)
         return
 
-    content := FileRead(file)
+    lines := ReadLogLines(file)
+    WriteLogLines(file, lines)
+}
 
-    ; Remove trailing blank lines / whitespace
-    cleaned := RTrim(content, "`r`n `t")
+SanitizeCsvField(val)
+{
+    clean := StrReplace(StrReplace(val, "`r"), "`n")
+    clean := StrReplace(clean, ",", " ")
+    return Trim(clean)
+}
 
-    ; Ensure exactly one newline at end
-    cleaned .= "`r`n"
+FormatCsvEntry(date, task, start, end, mins)
+{
+    return SanitizeCsvField(date) "," SanitizeCsvField(task) "," SanitizeCsvField(start) "," SanitizeCsvField(end) "," SanitizeCsvField(mins)
+}
 
-    if (cleaned != content)
+NormalizeCsvLine(line)
+{
+    parts := StrSplit(line, ",")
+    if (parts.Length < 5)
+        return Trim(line, "`r`n `t")
+
+    return FormatCsvEntry(parts[1], parts[2], parts[3], parts[4], parts[5])
+}
+
+AppendCsvLine(file, date, task, start, end, mins)
+{
+    TrimFileTrailingBlanks(file)
+    FileAppend(FormatCsvEntry(date, task, start, end, mins) "`r`n", file)
+}
+
+ReadLogLines(file)
+{
+    lines := []
+
+    if !FileExist(file)
+        return lines
+
+    for line in StrSplit(FileRead(file), "`n")
+    {
+        trimmed := Trim(line, "`r`n `t")
+        if (trimmed = "")
+            continue
+        normalized := NormalizeCsvLine(trimmed)
+        if (normalized != "")
+            lines.Push(normalized)
+    }
+
+    return lines
+}
+
+WriteLogLines(file, lines)
+{
+    if (lines.Length = 0)
     {
         FileDelete(file)
-        FileAppend(cleaned, file)
+        FileAppend("", file)
+        return
     }
+
+    content := ""
+    for line in lines
+        content .= line "`r`n"
+
+    FileDelete(file)
+    FileAppend(content, file)
 }
 
 
