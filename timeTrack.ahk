@@ -898,22 +898,22 @@ AddTimeEntry()
     dtDate := gAdd.Add("DateTime", "w200 vdtDate", "yyyy-MM-dd")
     dtDate.Value := A_Now
 
-    gAdd.Add("Text",, "Start time (HH:mm):")
-    startTimeEdit := gAdd.Add("Edit", "vstartTimeEdit w80", FormatTime(A_Now, "HH:mm"))
+    gAdd.Add("Text",, "Start time:")
+    startTimeCtl := gAdd.Add("DateTime", "vstartTimeCtl w120 Time Format HH':'mm", A_Now)
 
-    gAdd.Add("Text",, "End time (HH:mm):")
-    endTimeEdit := gAdd.Add("Edit", "vendTimeEdit w80", FormatTime(A_Now, "HH:mm"))
+    gAdd.Add("Text",, "End time:")
+    endTimeCtl := gAdd.Add("DateTime", "vendTimeCtl w120 Time Format HH':'mm", DateAdd(A_Now, 1, "Hours"))
 
     btnAdd    := gAdd.Add("Button", "w100", "Add Entry")
     btnCancel := gAdd.Add("Button", "w100", "Cancel")
 
-    btnAdd.OnEvent("Click", (*) => AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit))
+    btnAdd.OnEvent("Click", (*) => AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeCtl, endTimeCtl))
     btnCancel.OnEvent("Click", (*) => gAdd.Destroy())
 
     gAdd.Show()
 }
 
-AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
+AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeCtl, endTimeCtl)
 {
     global tasks, taskFile, logFile
 
@@ -935,41 +935,36 @@ AddTimeEntry_Commit(gAdd, ddTask, newTask, dtDate, startTimeEdit, endTimeEdit)
     }
 
     ; ----- Date -----
-    d := dtDate.Value
-    dateStr := FormatTime(d, "yyyy-MM-dd")
+    dateVal := dtDate.Value
+    if (dateVal = "")
+    {
+        MsgBox "Please pick a date."
+        return
+    }
+
+    dateStr := FormatTime(dateVal, "yyyy-MM-dd")
 
     ; ----- Time handling -----
-    startStr := startTimeEdit.Value
-    endStr   := endTimeEdit.Value
+    startVal := startTimeCtl.Value
+    endVal   := endTimeCtl.Value
 
-    ; Validate time format HH:mm
-    if !RegExMatch(startStr, "^\d{1,2}:\d{2}$")
+    if (startVal = "" || endVal = "")
     {
-        MsgBox "Invalid start time format. Use HH:mm."
-        return
-    }
-    if !RegExMatch(endStr, "^\d{1,2}:\d{2}$")
-    {
-        MsgBox "Invalid end time format. Use HH:mm."
+        MsgBox "Please pick both a start and end time."
         return
     }
 
-    ; Parse to numbers
-    sParts := StrSplit(startStr, ":")
-    eParts := StrSplit(endStr, ":")
+    startStr := FormatTime(startVal, "HH:mm")
+    endStr   := FormatTime(endVal, "HH:mm")
 
-    sh := Integer(sParts[1]), sm := Integer(sParts[2])
-    eh := Integer(eParts[1]), em := Integer(eParts[2])
+    startTotal := TimeStrToMinutes(startStr)
+    endTotal   := TimeStrToMinutes(endStr)
 
-    if (sh < 0 || sh > 23 || sm < 0 || sm > 59
-     || eh < 0 || eh > 23 || em < 0 || em > 59)
+    if (startTotal < 0 || endTotal < 0)
     {
-        MsgBox "Invalid time values. Hours 0–23, minutes 0–59."
+        MsgBox "Invalid time values. Use 24-hour HH:mm format."
         return
     }
-
-    startTotal := sh*60 + sm
-    endTotal   := eh*60 + em
 
     if (endTotal <= startTotal)
     {
