@@ -1381,8 +1381,8 @@ RenameTask(oldName, newName, updateEntries := true)
     tasks[idx] := Trim(newName)
     SaveTasks(taskFile, tasks)
 
-    if (updateEntries && FileExist(logFile))
-        ReplaceTaskInLogFile(logFile, oldName, newName)
+    if (updateEntries)
+        ReplaceTaskInLogDirectory(A_ScriptDir, oldName, newName)
 
     return true
 }
@@ -1437,6 +1437,20 @@ RefreshTaskDropdown(dd, selected := "")
                 dd.Value := i
                 break
             }
+    }
+}
+
+ReplaceTaskInLogDirectory(rootDir, oldName, newName)
+{
+    if (!DirExist(rootDir))
+        return
+
+    patterns := ["time_log*.csv", "time_archive*.csv"]
+
+    for pattern in patterns
+    {
+        Loop Files, rootDir "\\" pattern, "R"
+            ReplaceTaskInLogFile(A_LoopFileFullPath, oldName, newName)
     }
 }
 
