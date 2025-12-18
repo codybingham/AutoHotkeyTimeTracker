@@ -733,13 +733,24 @@ ManageTasks()
     global tasks
 
     gTask := Gui("+AlwaysOnTop", "Manage Tasks")
-    gTask.Add("Text",, "Select a task to delete or archive:")
+    gTask.Add("Text",, "Select a task to manage:")
     dd := gTask.Add("DropDownList", "w250", tasks)
 
-    btnDelete  := gTask.Add("Button", "w120", "Delete")
-    btnArchive := gTask.Add("Button", "w120", "Archive")
-    btnCancel  := gTask.Add("Button", "w120", "Cancel")
+    gTask.Add("GroupBox", "xm y+10 w420 h120", "Rename task")
+    gTask.Add("Text", "xm+10 yp+25", "New name:")
+    renameEdit := gTask.Add("Edit", "x+10 yp-5 w250")
+    updateEntries := gTask.Add(
+        "CheckBox",
+        "xm+10 y+10 Checked",
+        "Update existing time entries with this name"
+    )
+    btnRename := gTask.Add("Button", "xm y+10 w120", "Rename")
 
+    btnDelete  := gTask.Add("Button", "x+m w120", "Delete")
+    btnArchive := gTask.Add("Button", "x+m w120", "Archive")
+    btnCancel  := gTask.Add("Button", "x+m w120", "Cancel")
+
+    btnRename.OnEvent("Click", (*) => RenameTaskFromGui(gTask, dd, renameEdit, updateEntries))
     btnDelete.OnEvent("Click", (*) => DeleteTask(gTask, dd))
     btnArchive.OnEvent("Click", (*) => ArchiveTask(gTask, dd))
     btnCancel.OnEvent("Click", (*) => gTask.Destroy())
@@ -780,6 +791,39 @@ ArchiveTask(gTask, dd)
     SaveTasks(taskFile, tasks)
     MsgBox "Task archived: " task
     gTask.Destroy()
+}
+
+RenameTaskFromGui(gTask, dd, renameEdit, updateEntries)
+{
+    global tasks
+
+    oldName := dd.Text
+    newName := Trim(renameEdit.Value)
+
+    if (oldName = "")
+        return MsgBox("Select a task to rename.")
+
+    if (newName = "")
+        return MsgBox("Enter a new task name.")
+
+    if (StrLower(oldName) = StrLower(newName))
+        return MsgBox("Please choose a different name.")
+
+    for t in tasks
+        if (StrLower(t) = StrLower(newName))
+            return MsgBox("A task with that name already exists.")
+
+    if !RenameTask(oldName, newName, updateEntries.Value)
+        return MsgBox("Task not found.")
+
+    renameEdit.Value := ""
+    RefreshTaskDropdown(dd, newName)
+
+    detail := "Renamed task:`n" oldName " → " newName
+    if (updateEntries.Value)
+        detail .= "`nUpdated existing log entries."
+
+    MsgBox(detail)
 }
 
 
@@ -1319,6 +1363,30 @@ AddTask(name)
     return clean
 }
 
+RenameTask(oldName, newName, updateEntries := true)
+{
+    global tasks, taskFile, logFile
+
+    idx := 0
+    for i, t in tasks
+        if (StrLower(t) = StrLower(oldName))
+        {
+            idx := i
+            break
+        }
+
+    if (idx = 0)
+        return false
+
+    tasks[idx] := Trim(newName)
+    SaveTasks(taskFile, tasks)
+
+    if (updateEntries && FileExist(logFile))
+        ReplaceTaskInLogFile(logFile, oldName, newName)
+
+    return true
+}
+
 RemoveTask(name)
 {
     global tasks
@@ -1352,6 +1420,63 @@ SaveTasksOnExit(*)
     global taskFile, tasks
     SaveTasks(taskFile, tasks)
     DllCall("Wtsapi32.dll\WTSUnRegisterSessionNotification", "Ptr", A_ScriptHwnd)
+}
+
+RefreshTaskDropdown(dd, selected := "")
+{
+    global tasks
+
+    dd.Delete()
+    dd.Add(tasks)
+
+    if (selected != "")
+    {
+        for i, t in tasks
+            if (t = selected)
+            {
+                dd.Value := i
+                break
+            }
+    }
+}
+
+ReplaceTaskInLogFile(file, oldName, newName)
+{
+    if !FileExist(file)
+        return
+
+    updated := []
+    oldLower := StrLower(oldName)
+
+    for line in StrSplit(FileRead(file), "`n")
+    {
+        raw := Trim(line, "`r`n")
+        if (raw = "")
+        {
+            updated.Push(raw)
+            continue
+        }
+
+        parts := StrSplit(raw, ",")
+        if (parts.Length >= 5 && StrLower(Trim(parts[2])) = oldLower)
+        {
+            updated.Push(
+                FormatCsvEntry(
+                    Trim(parts[1]),
+                    newName,
+                    Trim(parts[3]),
+                    Trim(parts[4]),
+                    Trim(parts[5])
+                )
+            )
+        }
+        else
+        {
+            updated.Push(raw)
+        }
+    }
+
+    WriteLogLines(file, updated)
 }
 
 ; ================================================================
