@@ -17,6 +17,7 @@ A small, unobtrusive time tracker for Windows that keeps clean logs while you sw
 |--------|--------|
 | Open task picker | Ctrl + Alt + T |
 | Stop current task | Ctrl + Alt + 0 |
+| Open control panel | Ctrl + Alt + P |
 | Show weekly/today summary | Ctrl + Alt + S |
 | Manage tasks (delete/archive) | Ctrl + Alt + D |
 | Manage time entries (delete/archive) | Ctrl + Alt + E |
