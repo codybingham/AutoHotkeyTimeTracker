@@ -57,6 +57,7 @@ SetTimer(IdleMonitor, IdlePollInterval)
 ^!e::ManageEntries()    ; Delete/archive time entries
 ^!a::AddTimeEntry()     ; Manually add a time slot
 ^!c::OpenSettings()     ; Configure idle/lock behavior
+^!p::ShowControlPanel() ; Central control panel for dialogs
 
 
 ; ================================================================
@@ -470,6 +471,66 @@ HandleIdleReturn(gIdle, idleMinutes, ddIdle, newIdle, skipIdle,
         StartTask(nextTask)
 }
 
+
+
+; ================================================================
+; CONTROL PANEL
+; ================================================================
+ShowControlPanel()
+{
+    global gControlPanel
+
+    if (IsSet(gControlPanel) && IsObject(gControlPanel))
+    {
+        try
+        {
+            gControlPanel.Show()
+            gControlPanel.Focus()
+            return
+        }
+        catch
+        {
+            ; If the previous GUI is invalid, fall through and recreate it.
+        }
+    }
+
+    gControlPanel := Gui("+AlwaysOnTop", "Time Tracker Control Panel")
+    gControlPanel.OnEvent("Close", CloseControlPanel)
+
+    gControlPanel.Add("Text", "xm ym", "Open a dialog:")
+
+    btnStart := gControlPanel.Add("Button", "xm y+10 w220", "Start / Switch Task")
+    btnSummary := gControlPanel.Add("Button", "x+m w220", "Show Summary")
+
+    btnTasks := gControlPanel.Add("Button", "xm y+10 w220", "Manage Tasks")
+    btnEntries := gControlPanel.Add("Button", "x+m w220", "Manage Time Entries")
+
+    btnAdd := gControlPanel.Add("Button", "xm y+10 w220", "Add Time Entry")
+    btnSettings := gControlPanel.Add("Button", "x+m w220", "Settings")
+
+    btnClose := gControlPanel.Add("Button", "xm y+15 w220", "Close")
+
+    btnStart.OnEvent("Click", (*) => OpenTaskPicker())
+    btnSummary.OnEvent("Click", (*) => ShowSummary())
+    btnTasks.OnEvent("Click", (*) => ManageTasks())
+    btnEntries.OnEvent("Click", (*) => ManageEntries())
+    btnAdd.OnEvent("Click", (*) => AddTimeEntry())
+    btnSettings.OnEvent("Click", (*) => OpenSettings())
+    btnClose.OnEvent("Click", CloseControlPanel)
+
+    gControlPanel.Show()
+}
+
+CloseControlPanel(*)
+{
+    global gControlPanel
+
+    if (IsSet(gControlPanel) && IsObject(gControlPanel))
+    {
+        try gControlPanel.Destroy()
+        gControlPanel := ""
+    }
+}
 
 
 ; ================================================================
